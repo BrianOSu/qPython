@@ -17,32 +17,14 @@
 import asyncio
 import struct
 
-from abc import ABC, abstractmethod
 
-from qpython import MetaData, CONVERSION_OPTIONS
 from qpython.qtype import QException
 from qpython.qreader import QReader, QReaderException
 from qpython.qwriter import QWriter, QWriterException
+from qpython.qconnection import Connection, QConnectionException, QAuthenticationException, MessageType
 
 
-class QConnectionException(Exception):
-    """Raised when a connection to the q service cannot be established."""
-    pass
-
-
-class QAuthenticationException(QConnectionException):
-    """Raised when a connection to the q service is denied."""
-    pass
-
-
-class MessageType(object):
-    """Enumeration defining IPC protocol message types."""
-    ASYNC = 0
-    SYNC = 1
-    RESPONSE = 2
-
-
-class QConnection(object):
+class QConnection(Connection):
     """Connector class for interfacing with the q service.
 
     Provides methods for synchronous and asynchronous interaction.
@@ -75,25 +57,10 @@ class QConnection(object):
        strings are encoded as q strings instead of chars, **Default**: ``False``
     """
 
-    MAX_PROTOCOL_VERSION = 6
-
-    def __init__(self, host, port, username=None, password=None, timeout=None, encoding='latin-1', reader_class=None, writer_class=None, **options):
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-
-        self._connection = None
+    def __init__(self, host, port, username=None, password=None, timeout=None,
+                 encoding='latin-1', reader_class=None, writer_class=None, **options):
         self._s_reader = None
         self._s_writer = None
-        self._connection_file = None
-        self._protocol_version = None
-
-        self.timeout = timeout
-
-        self._encoding = encoding
-
-        self._options = MetaData(**CONVERSION_OPTIONS.union_dict(**options))
 
         try:
             from qpython._pandas import PandasQReader, PandasQWriter
@@ -109,20 +76,7 @@ class QConnection(object):
         if writer_class:
             self._writer_class = writer_class
 
-    def __enter__(self):
-        self.open()
-        return self
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-    @property
-    def protocol_version(self):
-        """Retrieves established version of the IPC protocol.
-
-        :returns: `integer` -- version of the IPC protocol
-        """
-        return self._protocol_version
+        super().__init__(host, port, username, password, timeout, encoding, reader_class, writer_class, **options)
 
     async def open(self):
         """Initialises connection to q service.
@@ -133,14 +87,15 @@ class QConnection(object):
 
         :raises: :class:`.QConnectionException`, :class:`.QAuthenticationException`
         """
-        if not self._connection:
+        if not self._s_writer:
             if not self.host:
                 raise QConnectionException('Host cannot be None')
 
             await self._init_socket()
             await self._initialize()
 
-            self._writer = self._writer_class(self._s_writer, protocol_version=self._protocol_version, encoding=self._encoding)
+            self._writer = self._writer_class(self._s_writer, protocol_version=self._protocol_version,
+                                              encoding=self._encoding)
             self._reader = self._reader_class(self._s_reader, encoding=self._encoding)
 
     async def _init_socket(self):
@@ -173,10 +128,8 @@ class QConnection(object):
         """Performs a IPC protocol handshake."""
         credentials = (self.username if self.username else '') + ':' + (self.password if self.password else '')
         credentials = credentials.encode(self._encoding)
-
         self._s_writer.write(credentials + bytes([self.MAX_PROTOCOL_VERSION, 0]))
         await self._s_writer.drain()
-
         response = await self._s_reader.read(1)
 
         if len(response) != 1:
@@ -185,16 +138,12 @@ class QConnection(object):
 
             self._s_writer.write(credentials + b'\0')
             await self._s_writer.drain()
-            
             response = await self._s_reader.read(1)
             if len(response) != 1:
                 await self.close()
                 raise QAuthenticationException('Connection denied.')
 
         self._protocol_version = min(struct.unpack('B', response)[0], self.MAX_PROTOCOL_VERSION)
-
-    def __str__(self):
-        return '%s@:%s:%s' % (self.username, self.host, self.port) if self.username else ':%s:%s' % (self.host, self.port)
 
     async def query(self, msg_type, query, *parameters, **options):
         """Performs a query against a q service.
@@ -297,7 +246,7 @@ class QConnection(object):
             self._writer.write(QException('nyi: qPython expected response message'), MessageType.ASYNC if response.type == MessageType.ASYNC else MessageType.RESPONSE)
             raise QReaderException('Received message of type: %s where response was expected')
 
-    def sendAsync(self, query, *parameters, **options):
+    async def sendAsync(self, query, *parameters, **options):
         """Performs an asynchronous query and returns **without** retrieving of
         the response.
 
@@ -323,7 +272,7 @@ class QConnection(object):
 
         :raises: :class:`.QConnectionException`, :class:`.QWriterException`
         """
-        self.query(MessageType.ASYNC, query, *parameters, **options)
+        await self.query(MessageType.ASYNC, query, *parameters, **options)
 
     async def receive(self, data_only=True, **options):
         """Reads and (optionally) parses the response from a q service.
