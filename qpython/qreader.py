@@ -20,6 +20,8 @@ if sys.version > '3':
     from sys import intern
     unicode = str
 
+from abc import ABC, abstractmethod
+
 from qpython import MetaData, CONVERSION_OPTIONS
 from qpython.qtype import *  # @UnusedWildImport
 from qpython.qcollection import qlist, QDictionary, qtable, QTable, QKeyedTable
@@ -30,12 +32,12 @@ try:
 except:
     from qpython.utils import uncompress
 
+
 class QReaderException(Exception):
     '''
     Indicates an error raised during data deserialization.
     '''
     pass
-
 
 
 class QMessage(object):
@@ -60,24 +62,20 @@ class QMessage(object):
     def data(self, value):
         self._data = value
 
-
     @property
     def type(self):
         '''Type of the message.'''
         return self._type
-
 
     @property
     def compression_mode(self):
         '''Indicates whether source message was compressed.'''
         return self._compression_mode
 
-
     @property
     def size(self):
         '''Size of the source message.'''
         return self._size
-
 
     def __init__(self, data, message_type, message_size, compression_mode):
         self._data = data
@@ -85,13 +83,11 @@ class QMessage(object):
         self._size = message_size
         self._compression_mode = compression_mode
 
-
     def __str__(self, *args, **kwargs):
         return 'QMessage: message type: %s, data size: %s, compression_mode: %s, data: %s' % (self._type, self._size, self._compression_mode, self._data)
 
 
-
-class QReader(object):
+class Reader(ABC):
     '''
     Provides deserialization from q IPC protocol.
 
@@ -107,14 +103,13 @@ class QReader(object):
     _reader_map = {}
     parse = Mapper(_reader_map)
 
-
     def __init__(self, stream, encoding = 'latin-1'):
         self._stream = stream
         self._buffer = QReader.BytesBuffer()
         self._encoding = encoding
 
-
-    async def read(self, source = None, **options):
+    @abstractmethod
+    def read(self, source=None, **options):
         '''
         Reads and optionally parses a single message.
 
@@ -133,12 +128,10 @@ class QReader(object):
         :returns: :class:`.QMessage` - read data (parsed or raw byte form) along
                   with meta information
         '''
-        message = await self.read_header(source)
-        message.data = await self.read_data(message.size, message.compression_mode, **options)
-        return message
+        pass
 
-
-    async def read_header(self, source = None):
+    @abstractmethod
+    def read_header(self, source = None):
         '''
         Reads and parses message header.
 
@@ -151,24 +144,10 @@ class QReader(object):
 
         :returns: :class:`.QMessage` - read meta information
         '''
-        if self._stream:
-            header = await self._read_bytes(8)
-            self._buffer.wrap(header)
-        else:
-            self._buffer.wrap(source)
+        pass
 
-        self._buffer.endianness = '<' if self._buffer.get_byte() == 1 else '>'
-        self._is_native = self._buffer.endianness == ('<' if sys.byteorder == 'little' else '>')
-        message_type = self._buffer.get_byte()
-        message_compression_mode = self._buffer.get_byte()
-        message_size_ext = self._buffer.get_byte()
-
-        message_size = self._buffer.get_uint()
-        message_size += message_size_ext << 32
-        return QMessage(None, message_type, message_size, message_compression_mode)
-
-
-    async def read_data(self, message_size, compression_mode = 0, **options):
+    @abstractmethod
+    def read_data(self, message_size, compression_mode = 0, **options):
         '''
         Reads and optionally parses data part of a message.
 
@@ -191,29 +170,6 @@ class QReader(object):
         '''
         self._options = MetaData(**CONVERSION_OPTIONS.union_dict(**options))
 
-        if compression_mode > 0:
-            comprHeaderLen = 4 if compression_mode == 1 else 8
-            if self._stream:
-                self._buffer.wrap(await self._read_bytes(comprHeaderLen))
-            uncompressed_size = -8 + (self._buffer.get_uint() if compression_mode == 1 else self._buffer.get_long())
-            compressed_data = await self._read_bytes(message_size - (8+comprHeaderLen)) if self._stream else self._buffer.raw(message_size - (8+comprHeaderLen))
-
-            raw_data = numpy.frombuffer(compressed_data, dtype = numpy.uint8)
-            if  uncompressed_size <= 0:
-                raise QReaderException('Error while data decompression.')
-
-            raw_data = uncompress(raw_data, numpy.int64(uncompressed_size))
-            raw_data = numpy.ndarray.tobytes(raw_data)
-            self._buffer.wrap(raw_data)
-        elif self._stream:
-            raw_data = await self._read_bytes(message_size - 8)
-            self._buffer.wrap(raw_data)
-        if not self._stream and self._options.raw:
-            raw_data = self._buffer.raw(message_size - 8)
-
-        return raw_data if self._options.raw else self._read_object()
-
-
     def _read_object(self):
         qtype = self._buffer.get_byte()
 
@@ -228,15 +184,12 @@ class QReader(object):
 
         raise QReaderException('Unable to deserialize q type: %s' % hex(qtype))
 
-
     def _get_reader(self, qtype):
         return self._reader_map.get(qtype, None)
-
 
     @parse(QERROR)
     def _read_error(self, qtype = QERROR):
         raise QException(self._read_symbol())
-
 
     @parse(QSTRING)
     def _read_string(self, qtype = QSTRING):
@@ -244,21 +197,17 @@ class QReader(object):
         length = self._buffer.get_int()
         return self._buffer.raw(length) if length > 0 else b''
 
-
     @parse(QSYMBOL)
     def _read_symbol(self, qtype = QSYMBOL):
         return numpy.string_(self._buffer.get_symbol())
-
 
     @parse(QCHAR)
     def _read_char(self, qtype = QCHAR):
         return chr(self._read_atom(QCHAR)).encode(self._encoding)
 
-
     @parse(QGUID)
     def _read_guid(self, qtype = QGUID):
         return uuid.UUID(bytes = self._buffer.raw(16))
-
 
     def _read_atom(self, qtype):
         try:
@@ -267,7 +216,6 @@ class QReader(object):
             return conversion(self._buffer.get(fmt))
         except KeyError:
             raise QReaderException('Unable to deserialize q type: %s' % hex(qtype))
-
 
     @parse(QTIMESPAN, QTIMESTAMP, QTIME, QSECOND, QMINUTE, QDATE, QMONTH, QDATETIME)
     def _read_temporal(self, qtype):
@@ -278,7 +226,6 @@ class QReader(object):
             return temporal if self._options.numpy_temporals else qtemporal(temporal, qtype = qtype)
         except KeyError:
             raise QReaderException('Unable to deserialize q type: %s' % hex(qtype))
-
 
     def _read_list(self, qtype):
         attr = self._buffer.get_byte()
@@ -306,7 +253,6 @@ class QReader(object):
         else:
             raise QReaderException('Unable to deserialize q type: %s' % hex(qtype))
 
-
     @parse(QDICTIONARY)
     def _read_dictionary(self, qtype = QDICTIONARY):
         keys = self._read_object()
@@ -316,7 +262,6 @@ class QReader(object):
             return QKeyedTable(keys, values)
         else:
             return QDictionary(keys, values)
-
 
     @parse(QTABLE)
     def _read_table(self, qtype = QTABLE):
@@ -328,14 +273,12 @@ class QReader(object):
 
         return qtable(columns, data, qtype = QTABLE)
 
-
     @parse(QGENERAL_LIST)
     def _read_general_list(self, qtype = QGENERAL_LIST):
         self._buffer.skip()  # ignore attributes
         length = self._buffer.get_int()
 
         return [self._read_object() for x in range(length)]
-
 
     @parse(QNULL)
     @parse(QUNARY_FUNC)
@@ -345,19 +288,16 @@ class QReader(object):
         code = self._buffer.get_byte()
         return None if qtype == QNULL and code == 0 else QFunction(qtype)
 
-
     @parse(QLAMBDA)
     def _read_lambda(self, qtype = QLAMBDA):
         self._buffer.get_symbol()  # skip
         expression = self._read_object()
         return QLambda(expression.decode())
 
-
     @parse(QCOMPOSITION_FUNC)
     def _read_function_composition(self, qtype = QCOMPOSITION_FUNC):
         self._read_projection(qtype)  # skip
         return QFunction(qtype)
-
 
     @parse(QADVERB_FUNC_106)
     @parse(QADVERB_FUNC_107)
@@ -369,28 +309,15 @@ class QReader(object):
         self._read_object()  # skip
         return QFunction(qtype)
 
-
     @parse(QPROJECTION)
     def _read_projection(self, qtype = QPROJECTION):
         length = self._buffer.get_int()
         parameters = [ self._read_object() for x in range(length) ]
         return QProjection(parameters)
 
-
-    async def _read_bytes(self, length):
-        if not self._stream:
-            raise QReaderException('There is no input data. QReader requires either stream or data chunk')
-
-        if length == 0:
-            return b''
-        else:
-            data = await self._stream.read(length)
-
-        if len(data) == 0:
-            raise QReaderException('Error while reading data')
-        return data
-
-
+    @abstractmethod
+    def _read_bytes(self, length):
+        pass
 
     class BytesBuffer(object):
         '''
@@ -563,3 +490,63 @@ class QReader(object):
             return raw.split(b'\x00')
 
 
+class QReader(Reader):
+    def read(self, source=None, **options):
+        message = self.read_header(source)
+        message.data = self.read_data(message.size, message.compression_mode, **options)
+        return message
+
+    def read_header(self, source=None):
+        if self._stream:
+            header = self._read_bytes(8)
+            self._buffer.wrap(header)
+        else:
+            self._buffer.wrap(source)
+
+        self._buffer.endianness = '<' if self._buffer.get_byte() == 1 else '>'
+        self._is_native = self._buffer.endianness == ('<' if sys.byteorder == 'little' else '>')
+        message_type = self._buffer.get_byte()
+        message_compression_mode = self._buffer.get_byte()
+        message_size_ext = self._buffer.get_byte()
+
+        message_size = self._buffer.get_uint()
+        message_size += message_size_ext << 32
+        return QMessage(None, message_type, message_size, message_compression_mode)
+
+    def read_data(self, message_size, compression_mode=0, **options):
+        super().read_data(message_size, compression_mode, **options)
+
+        if compression_mode > 0:
+            comprHeaderLen = 4 if compression_mode == 1 else 8
+            if self._stream:
+                self._buffer.wrap(self._read_bytes(comprHeaderLen))
+            uncompressed_size = -8 + (self._buffer.get_uint() if compression_mode == 1 else self._buffer.get_long())
+            compressed_data = self._read_bytes(message_size - (8+comprHeaderLen)) if self._stream else self._buffer.raw(message_size - (8+comprHeaderLen))
+
+            raw_data = numpy.frombuffer(compressed_data, dtype=numpy.uint8)
+            if uncompressed_size <= 0:
+                raise QReaderException('Error while data decompression.')
+
+            raw_data = uncompress(raw_data, numpy.int64(uncompressed_size))
+            raw_data = numpy.ndarray.tobytes(raw_data)
+            self._buffer.wrap(raw_data)
+        elif self._stream:
+            raw_data = self._read_bytes(message_size - 8)
+            self._buffer.wrap(raw_data)
+        if not self._stream and self._options.raw:
+            raw_data = self._buffer.raw(message_size - 8)
+
+        return raw_data if self._options.raw else self._read_object()
+
+    def _read_bytes(self, length):
+        if not self._stream:
+            raise QReaderException('There is no input data. QReader requires either stream or data chunk')
+
+        if length == 0:
+            return b''
+        else:
+            data = self._stream.read(length)
+
+        if len(data) == 0:
+            raise QReaderException('Error while reading data')
+        return data

@@ -19,8 +19,8 @@ import struct
 
 
 from qpython.qtype import QException
-from qpython.qreader import QReader, QReaderException
-from qpython.qwriter import QWriter, QWriterException
+from qpython.qaioreader import QReader, QReaderException
+from qpython.qaiowriter import QWriter, QWriterException
 from qpython.qconnection import Connection, QConnectionException, QAuthenticationException, MessageType
 
 
@@ -62,13 +62,9 @@ class QConnection(Connection):
         self._s_reader = None
         self._s_writer = None
 
-        try:
-            from qpython._pandas import PandasQReader, PandasQWriter
-            self._reader_class = PandasQReader
-            self._writer_class = PandasQWriter
-        except ImportError:
-            self._reader_class = QReader
-            self._writer_class = QWriter
+        # Todo: Add pands support
+        self._reader_class = QReader
+        self._writer_class = QWriter
 
         if reader_class:
             self._reader_class = reader_class

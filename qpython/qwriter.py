@@ -20,6 +20,8 @@ try:
 except ImportError:
     from io import BytesIO
 
+from abc import ABC, abstractmethod
+
 from qpython import MetaData, CONVERSION_OPTIONS
 from qpython.qtype import *  # @UnusedWildImport
 from qpython.qcollection import qlist, QList, QTemporalList, QDictionary, QTable, QKeyedTable, get_list_qtype
@@ -37,7 +39,7 @@ class QWriterException(Exception):
 ENDIANNESS = '\1' if sys.byteorder == 'little' else '\0'
 
 
-class QWriter(object):
+class Writer(ABC):
     '''
     Provides serialization to q IPC protocol.
     
@@ -54,14 +56,13 @@ class QWriter(object):
     _writer_map = {}
     serialize = Mapper(_writer_map)
 
-
-    def __init__(self, stream, protocol_version, encoding = 'latin-1'):
+    def __init__(self, stream, protocol_version, encoding='latin-1'):
         self._stream = stream
         self._protocol_version = protocol_version
         self._encoding = encoding
 
-
-    async def write(self, data, msg_type, **options):
+    @abstractmethod
+    def write(self, data, msg_type, **options):
         '''Serializes and pushes single data object to a wrapped stream.
         
         :Parameters:
@@ -90,14 +91,6 @@ class QWriter(object):
         self._buffer.seek(4)
         self._buffer.write(struct.pack('i', data_size))
 
-        # write data to socket
-        if self._stream:
-            self._stream.write(self._buffer.getvalue())
-            await self._stream.drain()
-        else:
-            return self._buffer.getvalue()
-
-
     def _write(self, data):
         if data is None:
             self._write_null()
@@ -119,14 +112,11 @@ class QWriter(object):
                 else:
                     raise QWriterException('Unable to serialize type: %s' % data.__class__ if isinstance(data, object) else type(data))
 
-
     def _get_writer(self, data_type):
         return self._writer_map.get(data_type, None)
 
-
     def _write_null(self):
         self._buffer.write(struct.pack('=bx', QNULL))
-
 
     @serialize(Exception)
     def _write_error(self, data):
@@ -141,7 +131,6 @@ class QWriter(object):
         self._buffer.write(msg.encode(self._encoding))
         self._buffer.write(b'\0')
 
-
     def _write_atom(self, data, qtype):
         try:
             self._buffer.write(struct.pack('b', qtype))
@@ -153,13 +142,11 @@ class QWriter(object):
         except KeyError:
             raise QWriterException('Unable to serialize type: %s' % data.__class__ if isinstance(data, object) else type(data))
 
-
     @serialize(tuple, list)
     def _write_generic_list(self, data):
         self._buffer.write(struct.pack('=bxi', QGENERAL_LIST, len(data)))
         for element in data:
             self._write(element)
-
 
     @serialize(str, bytes)
     def _write_string(self, data):
@@ -172,14 +159,12 @@ class QWriter(object):
             else:
                 self._buffer.write(data)
 
-
     @serialize(numpy.string_)
     def _write_symbol(self, data):
         self._buffer.write(struct.pack('=b', QSYMBOL))
         if data:
             self._buffer.write(data)
         self._buffer.write(b'\0')
-
 
     @serialize(uuid.UUID)
     def _write_guid(self, data):
@@ -188,7 +173,6 @@ class QWriter(object):
 
         self._buffer.write(struct.pack('=b', QGUID))
         self._buffer.write(data.bytes)
-
 
     @serialize(QTemporal)
     def _write_temporal(self, data):
@@ -201,7 +185,6 @@ class QWriter(object):
             self._buffer.write(struct.pack(fmt, to_raw_qtemporal(data.raw, data.meta.qtype)))
         except KeyError:
             raise QWriterException('Unable to serialize type: %s' % type(data))
-
 
     @serialize(numpy.datetime64, numpy.timedelta64)
     def _write_numpy_temporal(self, data):
@@ -217,13 +200,11 @@ class QWriter(object):
         except KeyError:
             raise QWriterException('Unable to serialize type: %s' % data.dtype)
 
-
     @serialize(QLambda)
     def _write_lambda(self, data):
         self._buffer.write(struct.pack('=b', QLAMBDA))
         self._buffer.write(b'\0')
         self._write_string(data.expression)
-
 
     @serialize(QProjection)
     def _write_projection(self, data):
@@ -231,13 +212,11 @@ class QWriter(object):
         for parameter in data.parameters:
             self._write(parameter)
 
-
     @serialize(QDictionary, QKeyedTable)
     def _write_dictionary(self, data):
         self._buffer.write(struct.pack('=b', QDICTIONARY))
         self._write(data.keys)
         self._write(data.values)
-
 
     @serialize(QTable)
     def _write_table(self, data):
@@ -246,7 +225,6 @@ class QWriter(object):
         self._buffer.write(struct.pack('=bxi', QGENERAL_LIST, len(data.dtype)))
         for column in data.dtype.names:
             self._write_list(data[column], data.meta[column])
-
 
     @serialize(numpy.ndarray, QList, QTemporalList)
     def _write_list(self, data, qtype = None):
@@ -282,4 +260,14 @@ class QWriter(object):
                     self._buffer.write(guid.bytes)
             else:
                 self._buffer.write(data.tobytes())
+
+
+class QWriter(Writer):
+    def write(self, data, msg_type, **options):
+        super().write(data, msg_type, **options)
+        # write data to socket
+        if self._stream:
+            self._stream.sendall(self._buffer.getvalue())
+        else:
+            return self._buffer.getvalue()
 
