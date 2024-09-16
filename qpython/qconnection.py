@@ -17,11 +17,12 @@
 import socket
 import struct
 
+from abc import ABC, abstractmethod
+
 from qpython import MetaData, CONVERSION_OPTIONS
 from qpython.qtype import QException
 from qpython.qreader import QReader, QReaderException
 from qpython.qwriter import QWriter, QWriterException
-
 
 
 class QConnectionException(Exception):
@@ -29,11 +30,9 @@ class QConnectionException(Exception):
     pass
 
 
-
 class QAuthenticationException(QConnectionException):
     '''Raised when a connection to the q service is denied.'''
     pass
-
 
 
 class MessageType(object):
@@ -43,8 +42,243 @@ class MessageType(object):
     RESPONSE = 2
 
 
+class Connection(ABC):
+    MAX_PROTOCOL_VERSION = 6
 
-class QConnection(object):
+    @abstractmethod
+    def __init__(self, host, port, username=None, password=None, timeout=None,
+                 encoding='latin-1', reader_class=None, writer_class=None, **options):
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.timeout = timeout
+
+        self._encoding = encoding
+        self._protocol_version = None
+
+        self._writer = None
+        self._reader = None
+
+        self._options = MetaData(**CONVERSION_OPTIONS.union_dict(**options))
+
+        pass
+
+    def __enter__(self):
+        self.open()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
+    def __str__(self):
+        return '%s@:%s:%s' % (self.username, self.host, self.port) \
+            if self.username \
+            else ':%s:%s' % (self.host, self.port)
+
+    @abstractmethod
+    def __call__(self, *parameters, **options):
+        pass
+
+    @property
+    def protocol_version(self):
+        """Retrieves established version of the IPC protocol.
+
+        :returns: `integer` -- version of the IPC protocol
+        """
+        return self._protocol_version
+
+    @abstractmethod
+    def open(self):
+        pass
+
+    @abstractmethod
+    def _init_socket(self):
+        """Initialises the socket used for communicating with a q service,"""
+        pass
+
+    @abstractmethod
+    def close(self):
+        pass
+
+    @abstractmethod
+    def is_connected(self):
+        """Checks whether connection with a q service has been established.
+
+        Connection is considered inactive when:
+         - it has not been initialised,
+         - it has been closed.
+
+        :returns: `boolean` -- ``True`` if connection has been established,
+                  ``False`` otherwise
+        """
+        pass
+
+    @abstractmethod
+    def _initialize(self):
+        """Performs a IPC protocol handshake."""
+        pass
+
+    @abstractmethod
+    def query(self, msg_type, query, *parameters, **options):
+        """Performs a query against a q service.
+
+        In typical use case, `query` is the name of the function to call and
+        `parameters` are its parameters. When `parameters` list is empty, the
+        query can be an arbitrary q expression (e.g. ``0 +/ til 100``).
+
+        Calls a anonymous function with a single parameter:
+
+            >>> q.query(qconnection.MessageType.SYNC,'{til x}', 10)
+
+        Executes a q expression:
+
+            >>> q.query(qconnection.MessageType.SYNC,'til 10')
+
+        :Parameters:
+         - `msg_type` (one of the constants defined in :class:`.MessageType`) -
+           type of the query to be executed
+         - `query` (`string`) - query to be executed
+         - `parameters` (`list` or `None`) - parameters for the query
+        :Options:
+         - `single_char_strings` (`boolean`) - if ``True`` single char Python
+           strings are encoded as q strings instead of chars,
+           **Default**: ``False``
+
+        :raises: :class:`.QConnectionException`, :class:`.QWriterException`
+        """
+        pass
+
+    @abstractmethod
+    def sendSync(self, query, *parameters, **options):
+        """Performs a synchronous query against a q service and returns parsed
+        data.
+
+        In typical use case, `query` is the name of the function to call and
+        `parameters` are its parameters. When `parameters` list is empty, the
+        query can be an arbitrary q expression (e.g. ``0 +/ til 100``).
+
+        Executes a q expression:
+
+            >>> print(q.sendSync('til 10'))
+            [0 1 2 3 4 5 6 7 8 9]
+
+        Executes an anonymous q function with a single parameter:
+
+            >>> print(q.sendSync('{til x}', 10))
+            [0 1 2 3 4 5 6 7 8 9]
+
+        Executes an anonymous q function with two parameters:
+
+            >>> print(q.sendSync('{y + til x}', 10, 1))
+            [ 1  2  3  4  5  6  7  8  9 10]
+
+            >>> print(q.sendSync('{y + til x}', *[10, 1]))
+            [ 1  2  3  4  5  6  7  8  9 10]
+
+        The :func:`.sendSync` is called from the overloaded :func:`.__call__`
+        function. This allows :class:`.QConnection` instance to be called as
+        a function:
+
+            >>> print(q('{y + til x}', 10, 1))
+            [ 1  2  3  4  5  6  7  8  9 10]
+
+
+        :Parameters:
+         - `query` (`string`) - query to be executed
+         - `parameters` (`list` or `None`) - parameters for the query
+        :Options:
+         - `raw` (`boolean`) - if ``True`` returns raw data chunk instead of
+           parsed data, **Default**: ``False``
+         - `numpy_temporals` (`boolean`) - if ``False`` temporal vectors are
+           backed by raw q representation (:class:`.QTemporalList`,
+           :class:`.QTemporal`) instances, otherwise are represented as
+           `numpy datetime64`/`timedelta64` arrays and atoms,
+           **Default**: ``False``
+         - `single_char_strings` (`boolean`) - if ``True`` single char Python
+           strings are encoded as q strings instead of chars,
+           **Default**: ``False``
+
+        :returns: query result parsed to Python data structures
+
+        :raises: :class:`.QConnectionException`, :class:`.QWriterException`,
+                 :class:`.QReaderException`
+        """
+        pass
+
+    @abstractmethod
+    def sendAsync(self, query, *parameters, **options):
+        """Performs an asynchronous query and returns **without** retrieving of
+        the response.
+
+        In typical use case, `query` is the name of the function to call and
+        `parameters` are its parameters. When `parameters` list is empty, the
+        query can be an arbitrary q expression (e.g. ``0 +/ til 100``).
+
+        Calls a anonymous function with a single parameter:
+
+            >>> q.sendAsync('{til x}', 10)
+
+        Executes a q expression:
+
+            >>> q.sendAsync('til 10')
+
+        :Parameters:
+         - `query` (`string`) - query to be executed
+         - `parameters` (`list` or `None`) - parameters for the query
+        :Options:
+         - `single_char_strings` (`boolean`) - if ``True`` single char Python
+           strings are encoded as q strings instead of chars,
+           **Default**: ``False``
+
+        :raises: :class:`.QConnectionException`, :class:`.QWriterException`
+        """
+        pass
+
+    @abstractmethod
+    def receive(self, data_only=True, **options):
+        """Reads and (optionally) parses the response from a q service.
+
+        Retrieves query result along with meta-information:
+
+            >>> q.query(qconnection.MessageType.SYNC,'{x}', 10)
+            >>> print(q.receive(data_only = False, raw = False))
+            QMessage: message type: 2, data size: 13, is_compressed: False, data: 10
+
+        Retrieves parsed query result:
+
+            >>> q.query(qconnection.MessageType.SYNC,'{x}', 10)
+            >>> print(q.receive(data_only = True, raw = False))
+            10
+
+        Retrieves not-parsed (raw) query result:
+
+            >>> from binascii import hexlify
+            >>> q.query(qconnection.MessageType.SYNC,'{x}', 10)
+            >>> print(hexlify(q.receive(data_only = True, raw = True)))
+            fa0a000000
+
+        :Parameters:
+         - `data_only` (`boolean`) - if ``True`` returns only data part of the
+           message, otherwise returns data and message meta-information
+           encapsulated in :class:`.QMessage` instance
+        :Options:
+         - `raw` (`boolean`) - if ``True`` returns raw data chunk instead of
+           parsed data, **Default**: ``False``
+         - `numpy_temporals` (`boolean`) - if ``False`` temporal vectors are
+           backed by raw q representation (:class:`.QTemporalList`,
+           :class:`.QTemporal`) instances, otherwise are represented as
+           `numpy datetime64`/`timedelta64` arrays and atoms,
+           **Default**: ``False``
+
+        :returns: depending on parameter flags: :class:`.QMessage` instance,
+                  parsed message, raw data
+        :raises: :class:`.QReaderException`
+        """
+        pass
+
+
+class QConnection(Connection):
     '''Connector class for interfacing with the q service.
     
     Provides methods for synchronous and asynchronous interaction.
@@ -77,23 +311,10 @@ class QConnection(object):
        strings are encoded as q strings instead of chars, **Default**: ``False``
     '''
 
-    MAX_PROTOCOL_VERSION = 6
-
-    def __init__(self, host, port, username = None, password = None, timeout = None, encoding = 'latin-1', reader_class = None, writer_class = None, **options):
-        self.host = host
-        self.port = port
-        self.username = username
-        self.password = password
-
+    def __init__(self, host, port, username=None, password=None, timeout=None,
+                 encoding='latin-1', reader_class=None, writer_class=None, **options):
         self._connection = None
         self._connection_file = None
-        self._protocol_version = None
-
-        self.timeout = timeout
-
-        self._encoding = encoding
-
-        self._options = MetaData(**CONVERSION_OPTIONS.union_dict(**options))
 
         try:
             from qpython._pandas import PandasQReader, PandasQWriter
@@ -109,24 +330,7 @@ class QConnection(object):
         if writer_class:
             self._writer_class = writer_class
 
-
-    def __enter__(self):
-        self.open()
-        return self
-
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        self.close()
-
-
-    @property
-    def protocol_version(self):
-        '''Retrieves established version of the IPC protocol.
-        
-        :returns: `integer` -- version of the IPC protocol
-        '''
-        return self._protocol_version
-
+        super().__init__(host, port, username, password, timeout, encoding, reader_class, writer_class, **options)
 
     def open(self):
         '''Initialises connection to q service.
@@ -147,7 +351,6 @@ class QConnection(object):
             self._writer = self._writer_class(self._connection, protocol_version = self._protocol_version, encoding = self._encoding)
             self._reader = self._reader_class(self._connection_file, encoding = self._encoding)
 
-
     def _init_socket(self):
         '''Initialises the socket used for communicating with a q service,'''
         try:
@@ -160,7 +363,6 @@ class QConnection(object):
             self._connection_file = None
             raise
 
-
     def close(self):
         '''Closes connection with the q service.'''
         if self._connection:
@@ -168,7 +370,6 @@ class QConnection(object):
             self._connection_file = None
             self._connection.close()
             self._connection = None
-
 
     def is_connected(self):
         '''Checks whether connection with a q service has been established. 
@@ -181,7 +382,6 @@ class QConnection(object):
                   ``False`` otherwise
         '''
         return True if self._connection else False
-
 
     def _initialize(self):
         '''Performs a IPC protocol handshake.'''
@@ -201,11 +401,6 @@ class QConnection(object):
                 raise QAuthenticationException('Connection denied.')
 
         self._protocol_version = min(struct.unpack('B', response)[0], self.MAX_PROTOCOL_VERSION)
-
-
-    def __str__(self):
-        return '%s@:%s:%s' % (self.username, self.host, self.port) if self.username else ':%s:%s' % (self.host, self.port)
-
 
     def query(self, msg_type, query, *parameters, **options):
         '''Performs a query against a q service.
@@ -244,7 +439,6 @@ class QConnection(object):
             self._writer.write(query, msg_type, **self._options.union_dict(**options))
         else:
             self._writer.write([query] + list(parameters), msg_type, **self._options.union_dict(**options))
-
 
     def sendSync(self, query, *parameters, **options):
         '''Performs a synchronous query against a q service and returns parsed 
@@ -309,7 +503,6 @@ class QConnection(object):
             self._writer.write(QException('nyi: qPython expected response message'), MessageType.ASYNC if response.type == MessageType.ASYNC else MessageType.RESPONSE)
             raise QReaderException('Received message of type: %s where response was expected')
 
-
     def sendAsync(self, query, *parameters, **options):
         '''Performs an asynchronous query and returns **without** retrieving of 
         the response.
@@ -338,8 +531,7 @@ class QConnection(object):
         '''
         self.query(MessageType.ASYNC, query, *parameters, **options)
 
-
-    def receive(self, data_only = True, **options):
+    def receive(self, data_only=True, **options):
         '''Reads and (optionally) parses the response from a q service.
         
         Retrieves query result along with meta-information:
@@ -380,7 +572,6 @@ class QConnection(object):
         '''
         result = self._reader.read(**self._options.union_dict(**options))
         return result.data if data_only else result
-
 
     def __call__(self, *parameters, **options):
         return self.sendSync(parameters[0], *parameters[1:], **options)

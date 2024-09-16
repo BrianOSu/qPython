@@ -14,7 +14,12 @@
 #  limitations under the License.
 #
 
-__all__ = ['qconnection', 'qtype', 'qtemporal', 'qcollection']
+import sys
+
+if sys.version_info >= (3, 5):
+    __all__ = ['qconnection', 'qtype', 'qtemporal', 'qcollection']
+else:
+    __all__ = ['qconnection', 'qaioconnection', 'qtype', 'qtemporal', 'qcollection']
 
 
 __version__ = '@@VERSION_PLACEHOLDER@@'
